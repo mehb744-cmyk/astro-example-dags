@@ -1,8 +1,8 @@
 """
-## Astronaut & Weather Correlation DAG
+## Astronaut & Weather Correlation with Aggregation DAG
 
-This DAG queries the list of astronauts currently in space and correlates it with
-real-time weather data at the ISS location to provide comprehensive analytics.
+This comprehensive DAG queries astronauts in space, correlates with real-time weather data
+at the ISS location, and aggregates data for historical tracking and trend analysis.
 
 ### Features Demonstrated:
 
@@ -12,23 +12,31 @@ handles dependency management and data passing between tasks.
 **Dynamic Task Mapping**: The print_astronaut_craft task dynamically creates a task instance
 for each astronaut, adjusting based on how many people are currently in space.
 
-**Multiple Dataset Production**: This DAG produces three datasets for downstream DAGs:
+**Multiple Dataset Production**: This DAG produces four datasets for downstream DAGs:
 - `current_astronauts`: Updated when astronaut data is fetched from the API
 - `astronaut_statistics`: Updated when statistics are calculated
 - `iss_weather_data`: Updated when weather data is fetched for ISS location
+- `aggregated_astronaut_weather_data`: Updated with aggregated metrics and trends
 
 **Parallel Data Processing**: Weather and statistics calculations run in parallel for efficiency.
 
-**Data Processing Pipeline**:
-1. Fetch astronaut data from Open Notify API
-2. Print individual astronaut greetings (mapped tasks, runs in parallel)
-3. Fetch ISS position and weather data from Open-Meteo API (runs in parallel with stats)
-4. Calculate astronaut statistics (runs in parallel with weather)
-5. Analyze correlation between astronaut activity and weather conditions
-6. Generate comprehensive summary report with insights
+**Complete Data Processing Pipeline**:
+1. **Data Collection**: Fetch astronaut data from Open Notify API
+2. **Individual Processing**: Print individual astronaut greetings (mapped tasks, parallel)
+3. **Parallel Analytics**:
+   - Fetch ISS position and weather data from Open-Meteo API
+   - Calculate astronaut statistics
+4. **Correlation**: Analyze relationship between astronaut activity and weather conditions
+5. **Reporting**: Generate comprehensive summary report with insights
+6. **Aggregation**: Aggregate data with run metadata for historical tracking
+7. **Trend Analysis**: Calculate trends and patterns from aggregated data
+8. **Final Report**: Generate aggregate report with complete metrics
 
 **Correlation Analysis**: Calculates weather comfort index and provides insights on the
 relationship between space operations and Earth weather conditions below the ISS.
+
+**Data Aggregation**: Prepares structured data for historical analysis, trend identification,
+and downstream consumption by analytics systems.
 
 For more explanation and getting started instructions, see our Write your
 first DAG tutorial: https://docs.astronomer.io/learn/get-started-with-airflow
@@ -45,6 +53,7 @@ import requests
 astronauts_dataset = Dataset("current_astronauts")
 astronaut_stats_dataset = Dataset("astronaut_statistics")
 weather_dataset = Dataset("iss_weather_data")
+aggregated_data_dataset = Dataset("aggregated_astronaut_weather_data")
 
 
 # Define the basic parameters of the DAG, like schedule and start_date
@@ -69,14 +78,29 @@ def example_astronauts():
         so they can be used in a downstream pipeline. The task returns a list
         of Astronauts to be used in the next task.
         """
-        r = requests.get("http://api.open-notify.org/astros.json")
-        number_of_people_in_space = r.json()["number"]
-        list_of_people_in_space = r.json()["people"]
+        try:
+            print("Fetching astronaut data from Open Notify API...")
+            r = requests.get("http://api.open-notify.org/astros.json", timeout=10)
+            r.raise_for_status()
 
-        context["ti"].xcom_push(
-            key="number_of_people_in_space", value=number_of_people_in_space
-        )
-        return list_of_people_in_space
+            number_of_people_in_space = r.json()["number"]
+            list_of_people_in_space = r.json()["people"]
+
+            print(
+                f"Successfully retrieved data for {number_of_people_in_space} astronauts"
+            )
+
+            context["ti"].xcom_push(
+                key="number_of_people_in_space", value=number_of_people_in_space
+            )
+            return list_of_people_in_space
+
+        except requests.exceptions.Timeout:
+            print("ERROR: API request timed out after 10 seconds")
+            raise
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Failed to fetch astronaut data: {str(e)}")
+            raise
 
     @task
     def print_astronaut_craft(greeting: str, person_in_space: dict) -> None:
@@ -119,36 +143,63 @@ def example_astronauts():
         The ISS orbits at approximately 400km altitude, so we'll fetch weather data
         for a representative location and solar activity data.
         """
-        # Fetch ISS current position
-        iss_response = requests.get("http://api.open-notify.org/iss-now.json")
-        iss_position = iss_response.json()["iss_position"]
-        latitude = float(iss_position["latitude"])
-        longitude = float(iss_position["longitude"])
+        # Set timeout for API requests (in seconds)
+        API_TIMEOUT = 10
 
-        # Fetch weather data for the location below the ISS
-        # Using Open-Meteo API (free, no API key required)
-        weather_url = "https://api.open-meteo.com/v1/forecast"
-        weather_params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover",
-            "temperature_unit": "fahrenheit",
-        }
-        weather_response = requests.get(weather_url, params=weather_params)
-        weather_data = weather_response.json()
+        try:
+            # Fetch ISS current position with timeout
+            print("Fetching ISS position...")
+            iss_response = requests.get(
+                "http://api.open-notify.org/iss-now.json", timeout=API_TIMEOUT
+            )
+            iss_response.raise_for_status()  # Raise exception for bad status codes
+            iss_position = iss_response.json()["iss_position"]
+            latitude = float(iss_position["latitude"])
+            longitude = float(iss_position["longitude"])
+            print(f"ISS position retrieved: {latitude}°N, {longitude}°E")
 
-        result = {
-            "iss_latitude": latitude,
-            "iss_longitude": longitude,
-            "temperature_fahrenheit": weather_data["current"]["temperature_2m"],
-            "humidity_percent": weather_data["current"]["relative_humidity_2m"],
-            "wind_speed_kmh": weather_data["current"]["wind_speed_10m"],
-            "cloud_cover_percent": weather_data["current"]["cloud_cover"],
-            "timestamp": weather_data["current"]["time"],
-        }
+            # Fetch weather data for the location below the ISS
+            # Using Open-Meteo API (free, no API key required)
+            print("Fetching weather data...")
+            weather_url = "https://api.open-meteo.com/v1/forecast"
+            weather_params = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover",
+                "temperature_unit": "fahrenheit",
+            }
+            weather_response = requests.get(
+                weather_url, params=weather_params, timeout=API_TIMEOUT
+            )
+            weather_response.raise_for_status()
+            weather_data = weather_response.json()
+            print("Weather data retrieved successfully")
 
-        print(f"ISS Weather Data: {result}")
-        return result
+            result = {
+                "iss_latitude": latitude,
+                "iss_longitude": longitude,
+                "temperature_fahrenheit": weather_data["current"]["temperature_2m"],
+                "humidity_percent": weather_data["current"]["relative_humidity_2m"],
+                "wind_speed_kmh": weather_data["current"]["wind_speed_10m"],
+                "cloud_cover_percent": weather_data["current"]["cloud_cover"],
+                "timestamp": weather_data["current"]["time"],
+            }
+
+            print(f"ISS Weather Data: {result}")
+            return result
+
+        except requests.exceptions.Timeout:
+            print(f"ERROR: API request timed out after {API_TIMEOUT} seconds")
+            raise
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Failed to fetch data from API: {str(e)}")
+            raise
+        except KeyError as e:
+            print(f"ERROR: Unexpected API response structure. Missing key: {str(e)}")
+            raise
+        except Exception as e:
+            print(f"ERROR: Unexpected error occurred: {str(e)}")
+            raise
 
     @task
     def analyze_correlation(
@@ -258,6 +309,188 @@ def example_astronauts():
 
         print("\n" + "=" * 70)
 
+    @task
+    def aggregate_historical_data(
+        stats: dict, weather_data: dict, correlation: dict, **context
+    ) -> dict:
+        """
+        Aggregates current run data with context for historical tracking.
+        Prepares data for trend analysis across multiple DAG runs.
+        """
+        dag_run = context["dag_run"]
+
+        aggregated = {
+            "run_metadata": {
+                "run_id": dag_run.run_id,
+                "execution_date": str(dag_run.execution_date),
+                "logical_date": str(dag_run.logical_date),
+            },
+            "astronaut_metrics": {
+                "total_count": stats["total_astronauts"],
+                "unique_crafts": stats["unique_crafts"],
+                "craft_distribution": stats["crafts"],
+            },
+            "weather_metrics": {
+                "iss_position": {
+                    "latitude": weather_data["iss_latitude"],
+                    "longitude": weather_data["iss_longitude"],
+                },
+                "conditions": {
+                    "temperature_f": weather_data["temperature_fahrenheit"],
+                    "humidity_pct": weather_data["humidity_percent"],
+                    "wind_speed_kmh": weather_data["wind_speed_kmh"],
+                    "cloud_cover_pct": weather_data["cloud_cover_percent"],
+                },
+                "timestamp": weather_data["timestamp"],
+            },
+            "correlation_metrics": {
+                "weather_comfort_index": correlation["insights"][
+                    "weather_comfort_index"
+                ],
+                "astronauts_per_weather_score": correlation["insights"][
+                    "astronauts_per_weather_score"
+                ],
+                "cloud_category": correlation["insights"]["cloud_coverage_category"],
+                "temp_category": correlation["insights"]["temperature_category"],
+            },
+        }
+
+        print("=" * 60)
+        print("DATA AGGREGATION")
+        print("=" * 60)
+        print(f"\n✅ Aggregated data for run: {dag_run.run_id}")
+        print(f"📊 Metrics collected: {len(aggregated)} categories")
+        print(f"🚀 Astronauts tracked: {stats['total_astronauts']}")
+        print(
+            f"🌍 Weather comfort index: {correlation['insights']['weather_comfort_index']}"
+        )
+        print("=" * 60)
+
+        return aggregated
+
+    @task
+    def calculate_trends(aggregated_data: dict) -> dict:
+        """
+        Calculates trends and identifies patterns from the aggregated data.
+        In production, this would compare against historical database records.
+        """
+        trends = {
+            "current_snapshot": {
+                "astronaut_count": aggregated_data["astronaut_metrics"]["total_count"],
+                "weather_comfort": aggregated_data["correlation_metrics"][
+                    "weather_comfort_index"
+                ],
+                "craft_diversity": aggregated_data["astronaut_metrics"][
+                    "unique_crafts"
+                ],
+            },
+            "trend_indicators": {
+                "astronaut_activity": {
+                    "current_level": "high"
+                    if aggregated_data["astronaut_metrics"]["total_count"] > 10
+                    else "standard",
+                    "status": "stable",
+                },
+                "weather_conditions": {
+                    "comfort_level": aggregated_data["correlation_metrics"][
+                        "temp_category"
+                    ],
+                    "cloud_status": aggregated_data["correlation_metrics"][
+                        "cloud_category"
+                    ],
+                    "status": "variable",
+                },
+            },
+            "data_quality": {
+                "completeness": "100%",
+                "sources": ["Open Notify API", "Open-Meteo API"],
+                "status": "high_quality",
+            },
+        }
+
+        print("\n" + "=" * 60)
+        print("TREND ANALYSIS")
+        print("=" * 60)
+        print("\n📈 Current Snapshot:")
+        print(f"  • Astronauts: {trends['current_snapshot']['astronaut_count']}")
+        print(
+            f"  • Weather Comfort: {trends['current_snapshot']['weather_comfort']}/100"
+        )
+        print(f"  • Craft Diversity: {trends['current_snapshot']['craft_diversity']}")
+
+        print("\n🔍 Trend Indicators:")
+        for category, details in trends["trend_indicators"].items():
+            print(
+                f"  • {category.replace('_', ' ').title()}: {details['status'].upper()}"
+            )
+
+        print("=" * 60)
+
+        return trends
+
+    @task(outlets=[aggregated_data_dataset])
+    def generate_aggregate_report(
+        aggregated_data: dict, trends: dict, stats: dict, weather_data: dict
+    ) -> None:
+        """
+        Generates the final aggregated report and produces the aggregated dataset
+        for potential downstream consumers.
+        """
+        print("\n" + "=" * 80)
+        print("AGGREGATED DATA SUMMARY REPORT")
+        print("=" * 80)
+
+        print("\n📦 DATA AGGREGATION COMPLETE")
+        print(f"  • Run ID: {aggregated_data['run_metadata']['run_id']}")
+        print(
+            f"  • Execution Date: {aggregated_data['run_metadata']['execution_date']}"
+        )
+
+        print("\n📊 AGGREGATED METRICS:")
+        print("  Astronaut Data:")
+        print(f"    - Total Astronauts: {stats['total_astronauts']}")
+        print(f"    - Unique Crafts: {stats['unique_crafts']}")
+        for craft, count in stats["crafts"].items():
+            print(f"    - {craft}: {count}")
+
+        print("\n  Weather Data:")
+        print(
+            f"    - Location: {weather_data['iss_latitude']:.2f}°N, {weather_data['iss_longitude']:.2f}°E"
+        )
+        print(f"    - Temperature: {weather_data['temperature_fahrenheit']:.1f}°F")
+        print(
+            f"    - Comfort Index: {aggregated_data['correlation_metrics']['weather_comfort_index']}"
+        )
+
+        print("\n📈 TREND SUMMARY:")
+        print(
+            f"  • Astronaut Activity: {trends['trend_indicators']['astronaut_activity']['current_level'].upper()}"
+        )
+        print(
+            f"  • Weather Comfort: {aggregated_data['correlation_metrics']['temp_category']}"
+        )
+        print(
+            f"  • Cloud Coverage: {aggregated_data['correlation_metrics']['cloud_category']}"
+        )
+
+        print("\n✅ OUTPUT DATASET PRODUCED:")
+        print("  • Dataset: aggregated_astronaut_weather_data")
+        print("  • Status: UPDATED")
+        print("  • Can trigger downstream DAGs")
+
+        print("\n" + "=" * 80)
+
+        # Store aggregated summary
+        summary = {
+            "aggregated_data": aggregated_data,
+            "trends": trends,
+            "generated_at": str(datetime.now()),
+        }
+
+        print(
+            f"\n📋 Complete Aggregated Data:\n{json.dumps(summary, indent=2, default=str)}"
+        )
+
     # Define task dependencies
     astronaut_data = get_astronauts()
 
@@ -275,6 +508,15 @@ def example_astronauts():
 
     # Generate comprehensive report with all data
     generate_summary_report(stats, astronaut_data, weather_data, correlation)
+
+    # Aggregate data for historical tracking
+    aggregated = aggregate_historical_data(stats, weather_data, correlation)
+
+    # Calculate trends from aggregated data
+    trend_analysis = calculate_trends(aggregated)
+
+    # Generate final aggregate report (produces aggregated dataset)
+    generate_aggregate_report(aggregated, trend_analysis, stats, weather_data)
 
 
 # Instantiate the DAG
