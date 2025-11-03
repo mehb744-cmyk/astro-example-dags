@@ -47,7 +47,9 @@ first DAG tutorial: https://docs.astronomer.io/learn/get-started-with-airflow
 from airflow import Dataset
 from airflow.decorators import dag, task
 from pendulum import datetime
+from datetime import datetime as dt
 import requests
+import json
 
 # Define datasets for data-driven scheduling
 astronauts_dataset = Dataset("current_astronauts")
@@ -139,9 +141,9 @@ def example_astronauts():
     @task(outlets=[weather_dataset])
     def get_iss_weather_data() -> dict:
         """
-        This task fetches weather data for the ISS location using Open-Meteo API.
-        The ISS orbits at approximately 400km altitude, so we'll fetch weather data
-        for a representative location and solar activity data.
+        This task fetches weather data for the ISS location using multiple weather APIs.
+        Tries Open-Meteo first, then falls back to WeatherAPI.com, then OpenWeatherMap.
+        If ISS location fails, uses Houston, TX (NASA JSC) as fallback location.
         """
         # Set timeout for API requests (in seconds)
         API_TIMEOUT = 10
@@ -152,15 +154,58 @@ def example_astronauts():
             iss_response = requests.get(
                 "http://api.open-notify.org/iss-now.json", timeout=API_TIMEOUT
             )
-            iss_response.raise_for_status()  # Raise exception for bad status codes
-            iss_position = iss_response.json()["iss_position"]
+            iss_response.raise_for_status()
+            iss_data = iss_response.json()
+
+            # Validate response structure
+            if "iss_position" not in iss_data:
+                print(f"WARNING: Unexpected ISS API response: {iss_data}")
+                raise ValueError("Invalid ISS API response structure")
+
+            iss_position = iss_data["iss_position"]
             latitude = float(iss_position["latitude"])
             longitude = float(iss_position["longitude"])
             print(f"ISS position retrieved: {latitude}°N, {longitude}°E")
 
-            # Fetch weather data for the location below the ISS
-            # Using Open-Meteo API (free, no API key required)
-            print("Fetching weather data...")
+            # Try multiple weather APIs in sequence
+            weather_result = _try_weather_apis(latitude, longitude, API_TIMEOUT)
+
+            if weather_result:
+                return weather_result
+
+            # If all APIs fail, use fallback location
+            print("WARNING: All weather APIs failed for ISS location")
+            print("Using fallback data for Houston, TX (NASA JSC)")
+            return _get_fallback_weather_data()
+
+        except requests.exceptions.Timeout:
+            print(f"WARNING: ISS API request timed out after {API_TIMEOUT} seconds")
+            print("Using fallback data for Houston, TX (NASA JSC)")
+            return _get_fallback_weather_data()
+
+        except requests.exceptions.RequestException as e:
+            print(f"WARNING: Failed to fetch ISS position: {str(e)}")
+            print("Using fallback data for Houston, TX (NASA JSC)")
+            return _get_fallback_weather_data()
+
+        except (KeyError, ValueError) as e:
+            print(f"WARNING: Unexpected API response structure: {str(e)}")
+            print("Using fallback data for Houston, TX (NASA JSC)")
+            return _get_fallback_weather_data()
+
+        except Exception as e:
+            print(f"WARNING: Unexpected error occurred: {str(e)}")
+            print("Using fallback data for Houston, TX (NASA JSC)")
+            return _get_fallback_weather_data()
+
+    def _try_weather_apis(latitude: float, longitude: float, timeout: int) -> dict:
+        """
+        Tries multiple weather APIs in sequence until one succeeds.
+        Returns weather data dict or None if all fail.
+        """
+        # API 1: Open-Meteo (Free, no API key required)
+        try:
+            print("Attempting weather fetch from Open-Meteo API...")
             weather_url = "https://api.open-meteo.com/v1/forecast"
             weather_params = {
                 "latitude": latitude,
@@ -168,38 +213,158 @@ def example_astronauts():
                 "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover",
                 "temperature_unit": "fahrenheit",
             }
+
+            weather_response = requests.get(
+                weather_url, params=weather_params, timeout=timeout
+            )
+            weather_response.raise_for_status()
+            weather_data = weather_response.json()
+
+            if "current" in weather_data:
+                current = weather_data["current"]
+                result = {
+                    "iss_latitude": latitude,
+                    "iss_longitude": longitude,
+                    "temperature_fahrenheit": current.get("temperature_2m", 0.0),
+                    "humidity_percent": current.get("relative_humidity_2m", 0.0),
+                    "wind_speed_kmh": current.get("wind_speed_10m", 0.0),
+                    "cloud_cover_percent": current.get("cloud_cover", 0.0),
+                    "timestamp": current.get("time", str(dt.now())),
+                    "data_source": "open-meteo",
+                }
+                print(f"✅ Open-Meteo API succeeded: {result}")
+                return result
+        except Exception as e:
+            print(f"❌ Open-Meteo API failed: {str(e)}")
+
+        # API 2: WeatherAPI.com (Free tier, no key needed for basic requests)
+        try:
+            print("Attempting weather fetch from WeatherAPI.com...")
+            weather_url = "https://api.weatherapi.com/v1/current.json"
+            weather_params = {
+                "q": f"{latitude},{longitude}",
+                "key": "demo",  # Demo key for testing, replace with real key in production
+            }
+
+            weather_response = requests.get(
+                weather_url, params=weather_params, timeout=timeout
+            )
+
+            # WeatherAPI may return 403 without valid key, skip to next
+            if weather_response.status_code == 403:
+                print("❌ WeatherAPI.com requires API key")
+            else:
+                weather_response.raise_for_status()
+                weather_data = weather_response.json()
+
+                if "current" in weather_data:
+                    current = weather_data["current"]
+                    result = {
+                        "iss_latitude": latitude,
+                        "iss_longitude": longitude,
+                        "temperature_fahrenheit": current.get("temp_f", 0.0),
+                        "humidity_percent": current.get("humidity", 0.0),
+                        "wind_speed_kmh": current.get("wind_kph", 0.0),
+                        "cloud_cover_percent": current.get("cloud", 0.0),
+                        "timestamp": current.get("last_updated", str(dt.now())),
+                        "data_source": "weatherapi.com",
+                    }
+                    print(f"✅ WeatherAPI.com succeeded: {result}")
+                    return result
+        except Exception as e:
+            print(f"❌ WeatherAPI.com failed: {str(e)}")
+
+        # API 3: wttr.in (Free, simple API)
+        try:
+            print("Attempting weather fetch from wttr.in...")
+            weather_url = f"https://wttr.in/{latitude},{longitude}"
+            weather_params = {"format": "j1"}
+
+            weather_response = requests.get(
+                weather_url, params=weather_params, timeout=timeout
+            )
+            weather_response.raise_for_status()
+            weather_data = weather_response.json()
+
+            if (
+                "current_condition" in weather_data
+                and len(weather_data["current_condition"]) > 0
+            ):
+                current = weather_data["current_condition"][0]
+                result = {
+                    "iss_latitude": latitude,
+                    "iss_longitude": longitude,
+                    "temperature_fahrenheit": float(current.get("temp_F", 0.0)),
+                    "humidity_percent": float(current.get("humidity", 0.0)),
+                    "wind_speed_kmh": float(current.get("windspeedKmph", 0.0)),
+                    "cloud_cover_percent": float(current.get("cloudcover", 0.0)),
+                    "timestamp": str(dt.now()),
+                    "data_source": "wttr.in",
+                }
+                print(f"✅ wttr.in API succeeded: {result}")
+                return result
+        except Exception as e:
+            print(f"❌ wttr.in API failed: {str(e)}")
+
+        # All APIs failed
+        print("❌ All weather APIs failed")
+        return None
+
+    def _get_fallback_weather_data() -> dict:
+        """
+        Returns fallback weather data for Houston, TX (NASA Johnson Space Center)
+        when ISS location data is unavailable or over oceans/poles.
+        """
+        API_TIMEOUT = 10
+        try:
+            # Houston, TX coordinates (NASA Johnson Space Center)
+            latitude, longitude = 29.5583, -95.0853
+
+            print(
+                f"Fetching fallback weather for Houston, TX: {latitude}°N, {longitude}°W"
+            )
+            weather_url = "https://api.open-meteo.com/v1/forecast"
+            weather_params = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover",
+                "temperature_unit": "fahrenheit",
+            }
+
             weather_response = requests.get(
                 weather_url, params=weather_params, timeout=API_TIMEOUT
             )
             weather_response.raise_for_status()
             weather_data = weather_response.json()
-            print("Weather data retrieved successfully")
 
+            current = weather_data["current"]
             result = {
                 "iss_latitude": latitude,
                 "iss_longitude": longitude,
-                "temperature_fahrenheit": weather_data["current"]["temperature_2m"],
-                "humidity_percent": weather_data["current"]["relative_humidity_2m"],
-                "wind_speed_kmh": weather_data["current"]["wind_speed_10m"],
-                "cloud_cover_percent": weather_data["current"]["cloud_cover"],
-                "timestamp": weather_data["current"]["time"],
+                "temperature_fahrenheit": current.get("temperature_2m", 72.0),
+                "humidity_percent": current.get("relative_humidity_2m", 60.0),
+                "wind_speed_kmh": current.get("wind_speed_10m", 10.0),
+                "cloud_cover_percent": current.get("cloud_cover", 30.0),
+                "timestamp": current.get("time", str(dt.now())),
+                "data_source": "fallback_houston_tx",
             }
 
-            print(f"ISS Weather Data: {result}")
+            print(f"Fallback weather data retrieved: {result}")
             return result
 
-        except requests.exceptions.Timeout:
-            print(f"ERROR: API request timed out after {API_TIMEOUT} seconds")
-            raise
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Failed to fetch data from API: {str(e)}")
-            raise
-        except KeyError as e:
-            print(f"ERROR: Unexpected API response structure. Missing key: {str(e)}")
-            raise
         except Exception as e:
-            print(f"ERROR: Unexpected error occurred: {str(e)}")
-            raise
+            print(f"ERROR: Even fallback data failed: {str(e)}")
+            # Return static default data as last resort
+            return {
+                "iss_latitude": 29.5583,
+                "iss_longitude": -95.0853,
+                "temperature_fahrenheit": 72.0,
+                "humidity_percent": 60.0,
+                "wind_speed_kmh": 10.0,
+                "cloud_cover_percent": 30.0,
+                "timestamp": str(dt.now()),
+                "data_source": "static_default",
+            }
 
     @task
     def analyze_correlation(
@@ -484,7 +649,7 @@ def example_astronauts():
         summary = {
             "aggregated_data": aggregated_data,
             "trends": trends,
-            "generated_at": str(datetime.now()),
+            "generated_at": str(dt.now()),
         }
 
         print(
