@@ -12,9 +12,8 @@ handles dependency management and data passing between tasks.
 **Dynamic Task Mapping**: The print_astronaut_craft task dynamically creates a task instance
 for each astronaut, adjusting based on how many people are currently in space.
 
-**Multiple Dataset Production**: This DAG produces five datasets for downstream DAGs:
+**Multiple Dataset Production**: This DAG produces four datasets for downstream DAGs:
 - `current_astronauts`: Updated when astronaut data is fetched from the API
-- `iss_location`: Updated when ISS position is fetched from the API
 - `astronaut_statistics`: Updated when statistics are calculated
 - `iss_weather_data`: Updated when weather data is fetched for ISS location
 - `aggregated_astronaut_weather_data`: Updated with aggregated metrics and trends
@@ -22,7 +21,7 @@ for each astronaut, adjusting based on how many people are currently in space.
 **Parallel Data Processing**: Weather and statistics calculations run in parallel for efficiency.
 
 **Complete Data Processing Pipeline**:
-1. **Data Collection**: Fetch astronaut data and ISS location from Open Notify API (parallel)
+1. **Data Collection**: Fetch astronaut data from Open Notify API
 2. **Individual Processing**: Print individual astronaut greetings (mapped tasks, parallel)
 3. **Parallel Analytics**:
    - Fetch ISS position and weather data from Open-Meteo API
@@ -55,7 +54,6 @@ import json
 # Define datasets for data-driven scheduling
 astronauts_dataset = Dataset("current_astronauts")
 astronaut_stats_dataset = Dataset("astronaut_statistics")
-iss_location_dataset = Dataset("iss_location")
 weather_dataset = Dataset("iss_weather_data")
 aggregated_data_dataset = Dataset("aggregated_astronaut_weather_data")
 
@@ -273,55 +271,6 @@ def example_astronauts():
             raise
         except requests.exceptions.RequestException as e:
             print(f"ERROR: Failed to fetch astronaut data: {str(e)}")
-            raise
-
-    @task(outlets=[iss_location_dataset])
-    def get_iss_location() -> dict:
-        """
-        This task fetches the current location of the International Space Station (ISS).
-        Returns latitude, longitude, and timestamp data.
-        Produces the iss_location dataset which can trigger downstream DAGs.
-        """
-        API_TIMEOUT = 10
-
-        try:
-            print("Fetching ISS current position...")
-            iss_response = requests.get(
-                "http://api.open-notify.org/iss-now.json", timeout=API_TIMEOUT
-            )
-            iss_response.raise_for_status()
-            iss_data = iss_response.json()
-
-            # Validate response structure
-            if "iss_position" not in iss_data:
-                print(f"ERROR: Unexpected ISS API response: {iss_data}")
-                raise ValueError("Invalid ISS API response structure")
-
-            iss_position = iss_data["iss_position"]
-            latitude = float(iss_position["latitude"])
-            longitude = float(iss_position["longitude"])
-            timestamp = iss_data.get("timestamp", int(dt.now().timestamp()))
-
-            location_data = {
-                "latitude": latitude,
-                "longitude": longitude,
-                "timestamp": timestamp,
-                "timestamp_readable": str(dt.fromtimestamp(timestamp)),
-            }
-
-            print(f"✅ ISS Location: {latitude:.4f}°N, {longitude:.4f}°E")
-            print(f"   Timestamp: {location_data['timestamp_readable']}")
-
-            return location_data
-
-        except requests.exceptions.Timeout:
-            print(f"ERROR: ISS API request timed out after {API_TIMEOUT} seconds")
-            raise
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Failed to fetch ISS position: {str(e)}")
-            raise
-        except (KeyError, ValueError) as e:
-            print(f"ERROR: Unexpected API response structure: {str(e)}")
             raise
 
     @task
@@ -710,7 +659,6 @@ def example_astronauts():
 
     # Define task dependencies
     astronaut_data = get_astronauts()
-    get_iss_location()
 
     # Use dynamic task mapping to run the print_astronaut_craft task for each astronaut
     print_astronaut_craft.partial(greeting="Hello! :)").expand(
