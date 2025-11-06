@@ -1,8 +1,9 @@
 """
-## Astronaut & Weather Correlation with Aggregation DAG
+## Astronaut & Weather Correlation with ML Regression DAG
 
 This comprehensive DAG queries astronauts in space, correlates with real-time weather data
-at the ISS location, and aggregates data for historical tracking and trend analysis.
+at the ISS location, builds a machine learning regression model, and aggregates data for
+historical tracking and trend analysis.
 
 ### Features Demonstrated:
 
@@ -27,13 +28,18 @@ for each astronaut, adjusting based on how many people are currently in space.
    - Fetch ISS position and weather data from Open-Meteo API
    - Calculate astronaut statistics
 4. **Correlation**: Analyze relationship between astronaut activity and weather conditions
-5. **Reporting**: Generate comprehensive summary report with insights
-6. **Aggregation**: Aggregate data with run metadata for historical tracking
-7. **Trend Analysis**: Calculate trends and patterns from aggregated data
-8. **Final Report**: Generate aggregate report with complete metrics
+5. **Machine Learning**: Build linear regression model to predict weather comfort index
+6. **Reporting**: Generate comprehensive summary report with insights and model results
+7. **Aggregation**: Aggregate data with run metadata for historical tracking
+8. **Trend Analysis**: Calculate trends and patterns from aggregated data
+9. **Final Report**: Generate aggregate report with complete metrics
 
 **Correlation Analysis**: Calculates weather comfort index and provides insights on the
 relationship between space operations and Earth weather conditions below the ISS.
+
+**Machine Learning**: Demonstrates a linear regression model that predicts weather comfort
+index from temperature, humidity, wind speed, and cloud cover. Uses scikit-learn for model
+training and provides feature importance analysis to identify the most influential weather factors.
 
 **Data Aggregation**: Prepares structured data for historical analysis, trend identification,
 and downstream consumption by analytics systems.
@@ -421,15 +427,131 @@ def example_astronauts():
         return analysis
 
     @task
+    def build_regression_model(weather_data: dict, correlation: dict) -> dict:
+        """
+        Builds a simple regression model to predict weather comfort index
+        from weather features. Uses synthetic historical data for demonstration.
+        In production, this would use actual historical data from a database.
+        """
+        from sklearn.linear_model import LinearRegression
+        from sklearn.preprocessing import StandardScaler
+        import numpy as np
+
+        print("\n" + "=" * 60)
+        print("REGRESSION MODEL TRAINING")
+        print("=" * 60)
+
+        # Generate synthetic historical data for demonstration
+        # In production, replace with actual historical weather data
+        np.random.seed(42)
+        n_samples = 100
+
+        # Simulate historical weather data with realistic ranges
+        historical_data = {
+            "temperature": np.random.uniform(40, 90, n_samples),
+            "humidity": np.random.uniform(20, 90, n_samples),
+            "wind_speed": np.random.uniform(0, 50, n_samples),
+            "cloud_cover": np.random.uniform(0, 100, n_samples),
+        }
+
+        # Calculate comfort index for historical data (same formula as correlation task)
+        comfort_indices = []
+        for i in range(n_samples):
+            comfort = (
+                (80 - abs(historical_data["temperature"][i] - 70))
+                + (100 - historical_data["humidity"][i])
+                + (50 - min(historical_data["wind_speed"][i], 50))
+                + (100 - historical_data["cloud_cover"][i])
+            ) / 4
+            comfort_indices.append(comfort)
+
+        # Prepare features (X) and target (y)
+        X = np.column_stack(
+            [
+                historical_data["temperature"],
+                historical_data["humidity"],
+                historical_data["wind_speed"],
+                historical_data["cloud_cover"],
+            ]
+        )
+        y = np.array(comfort_indices)
+
+        # Scale features for better model performance
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        # Train linear regression model
+        model = LinearRegression()
+        model.fit(X_scaled, y)
+
+        # Calculate R² score
+        r2_score = model.score(X_scaled, y)
+
+        print("\n📊 Model Training Complete:")
+        print(f"  • Training samples: {n_samples}")
+        print(f"  • R² Score: {r2_score:.4f}")
+        print(f"  • Model coefficients: {model.coef_}")
+        print(f"  • Model intercept: {model.intercept_:.2f}")
+
+        # Make prediction on current weather data
+        current_features = np.array(
+            [
+                [
+                    weather_data["temperature_fahrenheit"],
+                    weather_data["humidity_percent"],
+                    weather_data["wind_speed_kmh"],
+                    weather_data["cloud_cover_percent"],
+                ]
+            ]
+        )
+        current_scaled = scaler.transform(current_features)
+        predicted_comfort = model.predict(current_scaled)[0]
+        actual_comfort = correlation["insights"]["weather_comfort_index"]
+
+        print("\n🔮 Prediction on Current Weather:")
+        print(f"  • Predicted Comfort Index: {predicted_comfort:.2f}")
+        print(f"  • Actual Comfort Index: {actual_comfort:.2f}")
+        print(f"  • Prediction Error: {abs(predicted_comfort - actual_comfort):.2f}")
+
+        # Feature importance (absolute coefficient values)
+        feature_names = ["Temperature", "Humidity", "Wind Speed", "Cloud Cover"]
+        feature_importance = dict(zip(feature_names, np.abs(model.coef_), strict=False))
+        sorted_features = sorted(
+            feature_importance.items(), key=lambda x: x[1], reverse=True
+        )
+
+        print("\n📈 Feature Importance (by coefficient magnitude):")
+        for feature, importance in sorted_features:
+            print(f"  • {feature}: {importance:.4f}")
+
+        print("=" * 60)
+
+        return {
+            "model_type": "Linear Regression",
+            "r2_score": round(r2_score, 4),
+            "training_samples": n_samples,
+            "coefficients": model.coef_.tolist(),
+            "intercept": round(model.intercept_, 2),
+            "predicted_comfort": round(predicted_comfort, 2),
+            "actual_comfort": round(actual_comfort, 2),
+            "prediction_error": round(abs(predicted_comfort - actual_comfort), 2),
+            "feature_importance": {
+                k: round(v, 4) for k, v in feature_importance.items()
+            },
+            "most_important_feature": sorted_features[0][0],
+        }
+
+    @task
     def generate_summary_report(
         stats: dict,
         astronaut_list: list[dict],
         weather_data: dict,
         correlation_analysis: dict,
+        model_results: dict = None,
     ) -> None:
         """
         This task generates a comprehensive summary report including astronaut data,
-        weather conditions, and correlation analysis.
+        weather conditions, correlation analysis, and regression model results.
         """
         print("=" * 70)
         print("COMPREHENSIVE ASTRONAUT & WEATHER CORRELATION REPORT")
@@ -472,6 +594,19 @@ def example_astronauts():
             print("  • High astronaut activity in orbit - multiple missions active")
         else:
             print("  • Standard astronaut presence in orbit")
+
+        # Add regression model results if available
+        if model_results:
+            print("\n🤖 REGRESSION MODEL RESULTS:")
+            print(f"  • Model Type: {model_results['model_type']}")
+            print(f"  • R² Score: {model_results['r2_score']}")
+            print(f"  • Training Samples: {model_results['training_samples']}")
+            print(f"  • Predicted Comfort Index: {model_results['predicted_comfort']}")
+            print(f"  • Actual Comfort Index: {model_results['actual_comfort']}")
+            print(f"  • Prediction Error: {model_results['prediction_error']}")
+            print(
+                f"  • Most Important Feature: {model_results['most_important_feature']}"
+            )
 
         print("\n" + "=" * 70)
 
@@ -672,8 +807,13 @@ def example_astronauts():
     # Analyze correlation between astronaut data and weather
     correlation = analyze_correlation(stats, weather_data, astronaut_data)
 
+    # Build regression model to predict weather comfort
+    model_results = build_regression_model(weather_data, correlation)
+
     # Generate comprehensive report with all data
-    generate_summary_report(stats, astronaut_data, weather_data, correlation)
+    generate_summary_report(
+        stats, astronaut_data, weather_data, correlation, model_results
+    )
 
     # Aggregate data for historical tracking
     aggregated = aggregate_historical_data(stats, weather_data, correlation)
